@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rsx-analyzer"
+version = "0.1.0"
+description = "Atlas-aware analyses for XCP-D functional-connectivity outputs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2",
+]
+
+[project.optional-dependencies]
+test = []
+notebook = [
+    "ipykernel>=6",
+    "jupyter>=1",
+    "matplotlib>=3.7",
+    "scipy>=1.10",
+    "seaborn>=0.12",
+    "statsmodels>=0.14",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
