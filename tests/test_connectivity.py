@@ -34,6 +34,69 @@ class AtlasMetadataTests(unittest.TestCase):
         self.assertEqual(atlas.names, ("parcel-a",))
         self.assertEqual(atlas.networks, {})
 
+    def test_unassigned_nodes_are_not_treated_as_a_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "atlas.tsv"
+            path.write_text(
+                "index\tlabel\tnetwork_label\tnetwork_id\n"
+                "1\tcortical\tVisual\t1\n"
+                "2\tsubcortical\tn/a\tn/a\n",
+                encoding="utf-8",
+            )
+            atlas = load_atlas_tsv(path)
+
+        self.assertEqual(atlas.networks["network_label"], ("Visual", None))
+        self.assertNotIn("network_id", atlas.networks)
+
+    def test_bundled_atlas_tables_match_their_declared_node_counts(self):
+        atlas_directory = Path(__file__).parents[1] / "atlases"
+        expected_counts = {
+            "atlas-4S156Parcels_dseg.tsv": 156,
+            "atlas-4S256Parcels_dseg.tsv": 256,
+            "atlas-4S356Parcels_dseg.tsv": 356,
+            "atlas-4S456Parcels_dseg.tsv": 456,
+            "atlas-4S556Parcels_dseg.tsv": 556,
+            "atlas-4S656Parcels_dseg.tsv": 656,
+            "atlas-4S756Parcels_dseg.tsv": 756,
+            "atlas-4S856Parcels_dseg.tsv": 856,
+            "atlas-4S956Parcels_dseg.tsv": 956,
+            "atlas-4S1056Parcels_dseg.tsv": 1056,
+            "atlas-Glasser_dseg.tsv": 360,
+            "atlas-Gordon_dseg.tsv": 333,
+            "atlas-HCP_dseg.tsv": 19,
+            "atlas-Tian_dseg.tsv": 50,
+        }
+        self.assertEqual(
+            {path.name for path in atlas_directory.glob("*.tsv")},
+            set(expected_counts),
+        )
+        for filename, expected_count in expected_counts.items():
+            with self.subTest(atlas=filename):
+                atlas = load_atlas_tsv(atlas_directory / filename)
+                self.assertEqual(len(atlas.names), expected_count)
+                self.assertEqual(len(set(atlas.indices)), expected_count)
+
+        four_s = load_atlas_tsv(atlas_directory / "atlas-4S356Parcels_dseg.tsv")
+        self.assertEqual(len(four_s.networks["network_label"]), 356)
+        self.assertEqual(len({v for v in four_s.networks["network_label"] if v}), 7)
+        self.assertEqual(
+            len({v for v in four_s.networks["network_label_17network"] if v}), 17
+        )
+        glasser = load_atlas_tsv(atlas_directory / "atlas-Glasser_dseg.tsv")
+        self.assertEqual(
+            set(glasser.networks),
+            {"community_yeo", "community_mesulam", "community_economo"},
+        )
+        self.assertIn("community", load_atlas_tsv(
+            atlas_directory / "atlas-Gordon_dseg.tsv"
+        ).networks)
+        self.assertEqual(
+            load_atlas_tsv(atlas_directory / "atlas-HCP_dseg.tsv").networks, {}
+        )
+        self.assertEqual(
+            load_atlas_tsv(atlas_directory / "atlas-Tian_dseg.tsv").networks, {}
+        )
+
 
 class ConnectivitySummaryTests(unittest.TestCase):
     def setUp(self):
