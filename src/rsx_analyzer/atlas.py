@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _normalize_assignment(value: str | None) -> str | None:
+    assignment = (value or "").strip()
+    return None if assignment.casefold() in {"", "n/a", "na", "none"} else assignment
+
+
 @dataclass(frozen=True)
 class AtlasMetadata:
     """Atlas nodes in the order defined by the TSV's integer ``index``."""
@@ -20,8 +25,8 @@ def load_atlas_tsv(path: str | Path) -> AtlasMetadata:
     """Load an XCP-D-compatible atlas TSV or an AtlasPack 4S TSV.
 
     Node names are read from ``name`` (XCP-D schema) or ``label`` (AtlasPack
-    schema). Columns whose names identify network assignments are retained
-    when present; missing values remain unassigned.
+    schema).     Network and community assignment columns are retained when present;
+    blank and ``n/a`` assignments remain unassigned.
     """
     path = Path(path)
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -59,11 +64,13 @@ def load_atlas_tsv(path: str | Path) -> AtlasMetadata:
 
     network_columns = [
         column for column in fields
-        if column.casefold().startswith("network_label")
-        or column.casefold() == "network_id"
+        if column.casefold().startswith(("network_label", "community"))
     ]
     networks = {
-        column: tuple((row.get(column) or "").strip() or None for _, _, row in records)
+        column: tuple(
+            _normalize_assignment(row.get(column))
+            for _, _, row in records
+        )
         for column in network_columns
     }
     return AtlasMetadata(
