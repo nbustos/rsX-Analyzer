@@ -36,6 +36,11 @@ original exploratory workflow, with machine-specific file paths replaced by
 configurable paths. Its saved outputs have been cleared; run it against your
 own data.
 
+The atlas TSV/JSON sidecars examined for this project are included under
+[`atlases/`](atlases/). The network assignments they provide differ by atlas;
+see [`docs/atlas-metadata.md`](docs/atlas-metadata.md) before choosing a
+network feature set.
+
 ## Reusable code
 
 The `rsx_analyzer` package loads XCP-D-style atlas TSVs and computes
@@ -57,9 +62,11 @@ features = summarize_connectivity(
 )
 ```
 
-The chosen atlas TSV must match the matrix's node order. Matrices and atlas
-tables should come from the same XCP-D run/release. Check the atlas TSV's
-available network columns before requesting a network scheme.
+The chosen atlas TSV must match the matrix's node order. The bundled tables
+are metadata, not segmentation images; use atlas metadata from the same
+XCP-D run/release as the matrix. Check the TSV's available assignment columns
+before requesting a network scheme. HCP and Tian label tables have no network
+assignment column, so network summaries cannot be inferred for them.
 
 ## Development
 
