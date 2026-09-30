@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from collections.abc import Mapping
 
 
 def _normalize_assignment(value: str | None) -> str | None:
@@ -19,6 +20,34 @@ class AtlasMetadata:
     names: tuple[str, ...]
     indices: tuple[int, ...]
     networks: dict[str, tuple[str | None, ...]]
+
+
+def derive_network_assignments(
+    atlas: AtlasMetadata,
+    source_column: str,
+    atlas_names: Mapping[str, str],
+    assignments: Mapping[str, str],
+    target_column: str | None = None,
+) -> AtlasMetadata:
+    """Return an atlas with derived assignments for named parcels.
+
+    Existing non-null assignments are retained; ``assignments`` is applied to
+    parcels identified by ``atlas_names`` (for example subcortex/cerebellum).
+    """
+    if source_column not in atlas.networks:
+        raise KeyError(f"Unknown atlas network column: {source_column}")
+    target = target_column or source_column
+    values = list(atlas.networks[source_column])
+    for i, name in enumerate(atlas.names):
+        category = atlas_names.get(name)
+        if category in assignments:
+            values[i] = assignments[category]
+    networks = dict(atlas.networks)
+    networks[target] = tuple(values)
+    return replace(atlas, networks=networks)
+
+
+assign_derived_networks = derive_network_assignments
 
 
 def load_atlas_tsv(path: str | Path) -> AtlasMetadata:
