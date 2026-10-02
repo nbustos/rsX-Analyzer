@@ -44,6 +44,20 @@ class OrganizeTests(unittest.TestCase):
         self.assertTrue((o / "atlases/CIFTI/4S356/reho").is_dir())
         self.assertFalse(res.manifest["source"].str.contains("denoised|/test/").any())
 
+    def test_audit_counts_subjects_per_session(self):
+        _touch(self.src / "sub-9999" / "ses-01" / "func"
+               / f"sub-9999_ses-01_task-rest_{NII}_atlas-Gordon_reho.tsv")
+        res = organize_xcpd_outputs(self.src, self.out, atlases=["Gordon"])
+        a = res.audit
+        row = a[(a.format == "NIFTI") & (a.atlas == "Gordon") & (a.kind == "reho")
+                & (a.ext == "tsv")].iloc[0]
+        self.assertEqual(row["ses-01"], 1)
+        self.assertEqual(row["ses-02"], 1)
+        self.assertEqual(row["all_sessions"], 2)
+        self.assertEqual(res.n_subjects["ses-01"], 1)
+        self.assertEqual(res.n_subjects["ses-02"], 1)
+        self.assertEqual(res.subject_presence.loc["sub-1244"].max(), 1)
+
     def test_dry_run_and_idempotent(self):
         dry = organize_xcpd_outputs(self.src, self.out, dry_run=True)
         self.assertFalse(self.out.exists())

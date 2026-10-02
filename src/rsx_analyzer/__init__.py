@@ -22,14 +22,14 @@ from .workflow import (
     load_motion_metrics, run_workflow,
     detect_motion_mode,
 )
-from .organize import DEFAULT_ATLASES, OrganizeResult, classify_func_file, organize_xcpd_outputs
+from .organize import DEFAULT_ATLASES, OrganizeResult, audit_manifest, classify_func_file, organize_xcpd_outputs
 from .exports import export_analysis_results_pdf, export_excel, export_pdf
 from .plotting import (
     plot_feature_distribution, plot_feature_motion_associations,
     plot_outlier_summary, plot_threshold_comparison, plot_triple_networks,
 )
 
-__all__ = ["DEFAULT_ATLASES", "OrganizeResult", "classify_func_file", "organize_xcpd_outputs",
+__all__ = ["DEFAULT_ATLASES", "OrganizeResult", "audit_manifest", "classify_func_file", "organize_xcpd_outputs",
            "AtlasMetadata", "load_atlas_tsv", "summarize_connectivity",
            "discover_files", "discover_linc_qc_files", "parse_bids_entities",
            "inventory_hdf5", "read_motion_metrics",

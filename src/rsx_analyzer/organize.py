@@ -21,7 +21,7 @@ DEFAULT_ATLASES = ("4S356", "Gordon", "HCP", "Tian")
 FORMATS = ("CIFTI", "NIFTI")
 ATLAS_KINDS = ("conn_mats", "reho", "timeseries")
 MOTION_KINDS = ("dcan_qc", "linc_qc")
-MANIFEST_COLUMNS = ["subject", "session", "format", "atlas", "kind", "source",
+MANIFEST_COLUMNS = ["subject", "session", "format", "atlas", "kind", "ext", "source",
                     "destination", "status"]
 
 _DATA_SUFFIXES = (".tsv", ".json", ".nii", ".nii.gz")
@@ -32,6 +32,40 @@ class OrganizeResult:
     manifest: pd.DataFrame
     summary: pd.DataFrame
     results_dir: Path
+    audit: pd.DataFrame | None = None
+    subject_presence: pd.DataFrame | None = None
+    n_subjects: pd.Series | None = None
+
+
+def _file_ext(name: str) -> str:
+    return name.split(".", 1)[1] if "." in name else ""
+
+
+def audit_manifest(manifest: pd.DataFrame, subjects_by_session: dict | None = None):
+    """Count subjects holding each file type, per session.
+
+    Returns ``(audit, subject_presence, n_subjects)``. ``audit`` has one row per
+    format/atlas/kind/ext with the number of unique subjects per session and
+    in ``all_sessions``; ``subject_presence`` is a subject x file-type matrix of
+    the number of sessions with that file type; ``n_subjects`` is the number of
+    subjects with a func directory in each session (reference denominator).
+    """
+    keys = ["format", "atlas", "kind", "ext"]
+    n_subjects = pd.Series(
+        {ses: len(subs) for ses, subs in (subjects_by_session or {}).items()},
+        dtype="int64", name="n_subjects_traversed")
+    if manifest.empty:
+        return pd.DataFrame(columns=keys + ["all_sessions"]), pd.DataFrame(), n_subjects
+    audit = (manifest.groupby(keys + ["session"])["subject"].nunique()
+             .unstack("session", fill_value=0))
+    audit["all_sessions"] = manifest.groupby(keys)["subject"].nunique()
+    audit = audit.reset_index()
+    audit.columns.name = None
+    label = manifest[keys].astype(str).agg("/".join, axis=1).rename("file_type")
+    presence = (manifest.assign(file_type=label)
+                .groupby(["subject", "file_type"])["session"].nunique()
+                .unstack("file_type", fill_value=0))
+    return audit, presence, n_subjects
 
 
 def _entity(name: str, key: str) -> str | None:
@@ -103,6 +137,7 @@ def organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES,
                     (results_dir / "atlases" / fmt / atlas / kind).mkdir(parents=True, exist_ok=True)
 
     rows = []
+    subjects_by_session: dict[str, set] = {}
     for sub_dir in sorted(p for p in xcpd_dir.glob("sub-*") if p.is_dir()):
         ses_dirs = sorted(p for p in sub_dir.glob("ses-*") if p.is_dir()) or [sub_dir]
         for ses_dir in ses_dirs:
@@ -110,6 +145,7 @@ def organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES,
             func_dir = ses_dir / "func"
             if not func_dir.is_dir():
                 continue
+            subjects_by_session.setdefault(session, set()).add(sub_dir.name)
             for src in sorted(p for p in func_dir.iterdir() if p.is_file()):
                 cls = classify_func_file(src, atlases)
                 if cls is None:
@@ -126,6 +162,7 @@ def organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES,
                         shutil.copy2(src, dest)
                 rows.append({"subject": sub_dir.name, "session": session, "format": "n/a" if atlas is None else fmt,
                              "atlas": atlas or "motion", "kind": kind,
+                             "ext": _file_ext(src.name),
                              "source": str(src), "destination": str(dest),
                              "status": status})
 
@@ -133,4 +170,5 @@ def organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES,
     summary = (manifest.groupby(["format", "atlas", "kind", "status"]).size()
                .rename("n_files").reset_index()) if not manifest.empty else \
         pd.DataFrame(columns=["format", "atlas", "kind", "status", "n_files"])
-    return OrganizeResult(manifest, summary, results_dir)
+    audit, presence, n_subjects = audit_manifest(manifest, subjects_by_session)
+    return OrganizeResult(manifest, summary, results_dir, audit, presence, n_subjects)

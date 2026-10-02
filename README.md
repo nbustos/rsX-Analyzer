@@ -115,3 +115,7 @@ RESULTS/motion/{dcan_qc,linc_qc}
 - Connectivity files (`conmat`/`relmat`/`pconn`) and `coverage` files go to `conn_mats`.
 - Files are copied, never moved; identical files are skipped, differing ones are reported as `conflict`.
 - The return value has a per-file `manifest` and a `summary` count table.
+
+The result also includes an audit: `audit` (unique subjects per format/atlas/kind/extension by
+session plus `all_sessions`), `n_subjects` (subjects with a `func` dir per session) and
+`subject_presence` (subject x file-type matrix of sessions holding that file type).
