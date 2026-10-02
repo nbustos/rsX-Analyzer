@@ -1,0 +1,19 @@
+name: rsx
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - h5py
+  - openpyxl
+  - matplotlib
+  - scipy
+  - seaborn
+  - statsmodels
+  - ipykernel
+  - jupyter
+  - pip
+  # rsx-analyzer itself is installed in editable mode, without re-resolving deps
+  - pip:
+      - -e . --no-deps

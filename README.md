@@ -87,6 +87,18 @@ from `df_merged_runs`. In LINC merged summaries, `num_censored_volumes` and
 `num_retained_volumes` are summed over the selected runs; `mean_fd`, other
 motion metrics, and connectivity features are averaged.
 
+## Installation with conda (recommended)
+
+From the repository root:
+
+```bash
+conda env create -f environment.yml     # builds env "rsx" with all dependencies from conda-forge
+conda activate rsx
+python scripts/run_rsx.py --help
+```
+
+To update later: `git pull`, then `conda env update -f environment.yml --prune`.
+
 ## Development
 
 Requires Python 3.10 or newer (check with `python --version`; the base
