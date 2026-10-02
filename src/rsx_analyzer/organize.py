@@ -86,18 +86,16 @@ def _match_atlas(label: str | None, atlases) -> str | None:
 def classify_func_file(path: Path, atlases=DEFAULT_ATLASES, extensions=DEFAULT_EXTENSIONS):
     """Return ``(format, atlas, kind)`` for a func file or ``None`` to skip it.
 
-    ``atlas`` is ``None`` for motion files.
+    ``atlas`` is ``None`` for motion files, which ignore ``extensions``.
     """
     name = path.name
-    if not name.endswith(tuple(extensions)):
-        return None
     if name.endswith("desc-dcan_qc.hdf5"):
         kind, atlas = "dcan_qc", None
     elif name.endswith("desc-linc_qc.csv") or name.endswith("desc-linc_qc.tsv"):
         kind, atlas = "linc_qc", None
     else:
         atlas = _match_atlas(_entity(name, "atlas"), atlases)
-        if atlas is None:
+        if atlas is None or not name.endswith(tuple(extensions)):
             return None
         if "reho" in name:
             kind = "reho"
@@ -122,9 +120,9 @@ def organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES,
                           extensions=DEFAULT_EXTENSIONS) -> OrganizeResult:
     """Copy designated-atlas, ReHo, timeseries, conn_mat and motion files.
 
-    Only files whose names end in ``extensions`` (default ``.tsv`` and ``.csv``)
-    are copied; JSON sidecars, NIfTI/CIFTI images and HDF5 files are skipped.
-    Add ``".hdf5"`` to ``extensions`` to also copy DCAN motion files.
+    Atlas files (conn_mats, reho, timeseries) are copied only when their names end
+    in ``extensions`` (default ``.tsv`` and ``.csv``); JSON sidecars and NIfTI/CIFTI
+    images are skipped. Motion files (DCAN ``.hdf5``, LINC ``.csv``) are always copied.
 
     Traverses ``sub-*/[ses-*/]func``. Existing identical files are skipped, so the
     function is safe to re-run; existing files with different content are not

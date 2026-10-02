@@ -37,10 +37,10 @@ class OrganizeTests(unittest.TestCase):
         self.assertEqual(len(list((o / "atlases/NIFTI/Gordon/conn_mats").iterdir())), 1)
         self.assertEqual(len(list((o / "atlases/NIFTI/Gordon/reho").iterdir())), 1)
         self.assertEqual(len(list((o / "atlases/NIFTI/4S356/timeseries").iterdir())), 1)
-        self.assertFalse(any(o.rglob("*.json")) or any(o.rglob("*.nii")) or any(o.rglob("*.hdf5")))
+        self.assertFalse(any((o / "atlases").rglob("*.json")) or any((o / "atlases").rglob("*.nii")))
         self.assertFalse((o / "atlases/NIFTI/Glasser").exists())
         self.assertEqual(len(list((o / "motion/linc_qc").iterdir())), 1)
-        self.assertEqual(len(list((o / "motion/dcan_qc").iterdir())), 0)
+        self.assertEqual(len(list((o / "motion/dcan_qc").iterdir())), 1)
         self.assertTrue((o / "atlases/CIFTI/4S356/reho").is_dir())
         self.assertFalse(res.manifest["source"].str.contains("denoised|/test/").any())
 
@@ -57,10 +57,6 @@ class OrganizeTests(unittest.TestCase):
         self.assertEqual(res.n_subjects["ses-01"], 1)
         self.assertEqual(res.n_subjects["ses-02"], 1)
         self.assertEqual(res.subject_presence.loc["sub-1244"].max(), 1)
-
-    def test_hdf5_opt_in(self):
-        organize_xcpd_outputs(self.src, self.out, extensions=(".tsv", ".csv", ".hdf5"))
-        self.assertEqual(len(list((self.out / "motion/dcan_qc").iterdir())), 1)
 
     def test_dry_run_and_idempotent(self):
         dry = organize_xcpd_outputs(self.src, self.out, dry_run=True)
