@@ -68,6 +68,25 @@ XCP-D run/release as the matrix. Check the TSV's available assignment columns
 before requesting a network scheme. HCP and Tian label tables have no network
 assignment column, so network summaries cannot be inferred for them.
 
+The `rs-X1.ipynb` workflow supports two motion-QC input formats. Set the motion
+directory's final folder name to `dcan_qc` for DCAN HDF5 inputs or `linc_qc`
+for LINC CSV inputs. LINC CSVs must include `mean_fd`,
+`num_censored_volumes`, and `num_retained_volumes`; subject/session/task/run
+entities may be columns in the CSV or BIDS entities in its filename. Optional
+`space`, `res`, and `desc` metadata are preserved. For each subject/session,
+the workflow ranks matched runs by remaining seconds (DCAN) or
+`num_retained_volumes` (LINC), highest first, with run label as a deterministic
+tie-breaker. It selects at most the top two runs. By default, every selected
+run must meet the minimum of 240 seconds/retained volumes for the
+subject/session to appear in `df_merged_runs`; if either of two selected runs
+falls below 240, that session is omitted. A session with only one matched run
+is included when that run meets the same minimum. This threshold is configurable
+through `run_workflow(..., minimum_retained_value=...)`. The `master` table
+still contains all matched readable runs, including runs/sessions excluded
+from `df_merged_runs`. In LINC merged summaries, `num_censored_volumes` and
+`num_retained_volumes` are summed over the selected runs; `mean_fd`, other
+motion metrics, and connectivity features are averaged.
+
 ## Development
 
 Install the package and test dependencies, then run the test suite:
@@ -79,3 +98,20 @@ python -m unittest discover -s tests
 
 Do not commit participant-level data, derived matrices, spreadsheets, or
 notebook outputs. Keep analysis data outside this repository.
+
+## Setup: organizing XCP-D outputs
+
+`organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES, dry_run=False)`
+traverses `sub-*/ses-*/func` and copies atlas, ReHo, timeseries, connectivity and
+motion-QC files into:
+
+```
+RESULTS/atlases/{CIFTI,NIFTI}/<atlas>/{conn_mats,reho,timeseries}
+RESULTS/motion/{dcan_qc,linc_qc}
+```
+
+- Default atlases: `4S356, Gordon, HCP, Tian` (`4S356` also matches `atlas-4S356Parcels`).
+- `space-fsLR` files go to `CIFTI`; other spaces go to `NIFTI`.
+- Connectivity files (`conmat`/`relmat`/`pconn`) and `coverage` files go to `conn_mats`.
+- Files are copied, never moved; identical files are skipped, differing ones are reported as `conflict`.
+- The return value has a per-file `manifest` and a `summary` count table.

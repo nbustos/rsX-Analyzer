@@ -193,7 +193,7 @@ def _add_summary_page(pdf: object, summary_lines: Sequence[str], report_label: s
 
 def _add_motion_association_page(
     pdf: object, motion_associations: pd.DataFrame, page_number: int,
-    fd_threshold: float, report_label: str, top_n: int = 20,
+    motion_mode: str, fd_threshold: float, report_label: str, top_n: int = 20,
 ) -> None:
     import matplotlib.pyplot as plt
     association_plot = motion_associations.head(top_n).sort_values("spearman_rho")
@@ -201,7 +201,12 @@ def _add_motion_association_page(
     colors = ["#c27a62" if value < 0 else "#477c9c" for value in association_plot["spearman_rho"]]
     ax.barh(association_plot["feature"], association_plot["spearman_rho"], color=colors)
     ax.axvline(0, color="#303b42", linewidth=0.8)
-    ax.set_xlabel(f"Spearman correlation with remaining seconds (FD={fd_threshold:g})")
+    metric_label = (
+        f"remaining seconds (FD={fd_threshold:g})"
+        if motion_mode == "dcan_qc"
+        else "num_retained_volumes"
+    )
+    ax.set_xlabel(f"Spearman correlation with {metric_label}")
     ax.set_title(
         "Connectivity features most associated with motion-related data loss",
         loc="left", fontsize=16, weight="bold", color="#24465c",
@@ -241,6 +246,7 @@ def export_analysis_results_pdf(
     triple_feature_order: Sequence[str] | None = None,
     triple_network_figure: object | None = None,
     outlier_z_threshold: float = 3.5,
+    motion_mode: str = "dcan_qc",
     report_label: str = "rs-X1 analysis",
 ) -> Path:
     """Export the 7-page print-ready analysis results PDF.
@@ -269,7 +275,11 @@ def export_analysis_results_pdf(
         f"Atlas: {atlas_name} ({n_atlas_parcels} parcels)",
         "Connectivity partitions: Schaefer 9-network and 19-network",
         "ROI seeds: left, right, and bilateral hippocampus and amygdala",
-        f"Motion threshold used for the master features: FD={fd_threshold:g}",
+        (
+            f"Motion threshold used for the master features: FD={fd_threshold:g}"
+            if motion_mode == "dcan_qc"
+            else "Motion mode: LINC QC CSV (runs ranked by retained volumes)"
+        ),
         f"Connectivity matrices found: {n_conn_files}",
         f"Motion files found: {n_motion_files} ({n_motion_readable} readable)",
         f"Matched readable subject/session/run rows: {n_master_rows}",
@@ -290,14 +300,19 @@ def export_analysis_results_pdf(
     with PdfPages(path) as pdf:
         _add_summary_page(pdf, summary_lines, report_label)
         add_report_table_page(
-            pdf, "Motion Threshold Summary", threshold_summary, 2,
+            pdf,
+            "Motion Threshold Summary" if motion_mode == "dcan_qc" else "LINC Motion Summary",
+            threshold_summary, 2,
             subtitle=(
                 "Remaining scan duration is shown for the candidate FD thresholds; "
                 f"FD={fd_threshold:g} is used for downstream features."
-            ),
+            ) if motion_mode == "dcan_qc" else
+            "Summary of num_retained_volumes from the LINC QC CSV rows.",
             report_label=report_label,
         )
-        _add_motion_association_page(pdf, motion_associations, 3, fd_threshold, report_label)
+        _add_motion_association_page(
+            pdf, motion_associations, 3, motion_mode, fd_threshold, report_label
+        )
         add_report_table_page(
             pdf, "Features with the Most Outlier Flags", outlier_feature_summary.head(20), 4,
             subtitle=(

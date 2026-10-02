@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from .atlas import AtlasMetadata, load_atlas_tsv
-from .bids import RUN_KEY, discover_files
+from .bids import RUN_KEY, discover_files, discover_linc_qc_files
 from .connectivity import summarize_connectivity_partitions
 from .motion import read_motion_metrics
 from .runs import coverage_summary as _coverage_summary, feature_motion_associations
@@ -84,6 +84,9 @@ class MotionLoadResult:
 
     motion_df: pd.DataFrame
     motion_load_errors: pd.DataFrame
+    motion_feature_columns: tuple[str, ...]
+    metadata_columns: tuple[str, ...]
+    run_selection_column: str
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,8 @@ class WorkflowResult:
     master: MasterDatasetResult
     motion_associations: pd.DataFrame
     merged_runs: pd.DataFrame
+    motion_mode: str
+    run_selection_column: str
 
 
 def derive_analysis_atlas(
@@ -163,10 +168,25 @@ def derive_analysis_atlas(
 def discover_run_files(
     conn_mats_path: str | Path, motion_path: str | Path, task_filter: str | None = "rest",
 ) -> DiscoveryResult:
-    """Discover connectivity matrices and motion HDF5 files by BIDS entities."""
+    """Discover connectivity matrices and motion files by selected QC mode."""
     conn_files = discover_files(conn_mats_path, "*_conmat.tsv", task_filter)
-    motion_files = discover_files(motion_path, "*.hdf5", task_filter)
+    motion_mode = detect_motion_mode(motion_path)
+    if motion_mode == "dcan_qc":
+        motion_files = discover_files(motion_path, "*.hdf5", task_filter)
+    else:
+        motion_files = discover_linc_qc_files(motion_path, task_filter)
     return DiscoveryResult(conn_files=conn_files, motion_files=motion_files)
+
+
+def detect_motion_mode(motion_path: str | Path) -> str:
+    """Select motion processing mode from the input folder name."""
+    folder_name = Path(motion_path).name.casefold()
+    if folder_name not in {"dcan_qc", "linc_qc"}:
+        raise ValueError(
+            "Motion input folder must be named 'dcan_qc' or 'linc_qc'; "
+            f"got {folder_name!r}"
+        )
+    return folder_name
 
 
 def load_connectivity_features(
@@ -213,14 +233,52 @@ def load_connectivity_features(
 
 
 def load_motion_metrics(
-    motion_files: pd.DataFrame, fd_threshold: float = 0.3,
+    motion_files: pd.DataFrame, fd_threshold: float = 0.3, *, motion_mode: str = "dcan_qc",
 ) -> MotionLoadResult:
-    """Read DCAN motion metrics at one FD threshold, keeping unreadable files.
+    """Load DCAN HDF5 or LINC CSV motion metrics.
 
-    Unreadable HDF5 files (``OSError``) are retained in ``motion_load_errors``
-    with their BIDS keys, path, and error message rather than being silently
-    dropped from the file inventory.
+    Unreadable DCAN HDF5 files are retained in ``motion_load_errors``. LINC
+    CSV rows are parsed during discovery and include their BIDS metadata.
     """
+    if motion_mode == "linc_qc":
+        metric_columns = ("mean_fd", "num_censored_volumes", "num_retained_volumes")
+        metadata_columns = tuple(
+            column for column in (
+                "sub", "ses", "task_entity", "run_entity", "space", "res", "desc"
+            ) if column in motion_files
+        )
+        failed = motion_files.loc[motion_files["read_error"].notna()] if "read_error" in motion_files else motion_files.iloc[0:0]
+        motion_errors = pd.DataFrame({
+            **{column: failed[column].tolist() for column in KEY_COLUMNS},
+            "motion_csv_path": failed["file_path"].astype(str).tolist(),
+            "error": failed["read_error"].tolist(),
+        })
+        readable = motion_files.loc[
+            motion_files["read_error"].isna()
+        ].copy() if "read_error" in motion_files else motion_files.copy()
+        motion_df = readable[[*KEY_COLUMNS, *metadata_columns, *metric_columns]].copy()
+        for column in metric_columns:
+            motion_df[column] = pd.to_numeric(motion_df[column], errors="raise")
+        if motion_df[["mean_fd", "num_censored_volumes", "num_retained_volumes"]].isna().any().any():
+            raise ValueError("LINC motion metrics cannot contain missing values")
+        if not np.isfinite(
+            motion_df[list(metric_columns)].to_numpy(dtype=float)
+        ).all():
+            raise ValueError("LINC motion metrics must be finite")
+        if (motion_df[["mean_fd", "num_censored_volumes", "num_retained_volumes"]] < 0).any().any():
+            raise ValueError("LINC motion metrics must be non-negative")
+        return MotionLoadResult(
+            motion_df=motion_df,
+            motion_load_errors=motion_errors.reindex(
+                columns=[*KEY_COLUMNS, "motion_csv_path", "error"]
+            ),
+            motion_feature_columns=metric_columns,
+            metadata_columns=metadata_columns,
+            run_selection_column="num_retained_volumes",
+        )
+    if motion_mode != "dcan_qc":
+        raise ValueError(f"Unsupported motion mode {motion_mode!r}")
+
     motion_rows: list[dict[str, object]] = []
     error_rows: list[dict[str, object]] = []
     for record in motion_files.to_dict("records"):
@@ -239,7 +297,13 @@ def load_motion_metrics(
         })
     return MotionLoadResult(
         motion_df=pd.DataFrame(motion_rows),
-        motion_load_errors=pd.DataFrame(error_rows),
+        motion_load_errors=pd.DataFrame(
+            error_rows,
+            columns=[*KEY_COLUMNS, "motion_hdf5_path", "error"],
+        ),
+        motion_feature_columns=MOTION_FEATURE_COLUMNS,
+        metadata_columns=(),
+        run_selection_column="remaining_seconds",
     )
 
 
@@ -248,6 +312,7 @@ def build_run_level_table(
     motion_files: pd.DataFrame,
     connectivity_df: pd.DataFrame,
     motion_df: pd.DataFrame,
+    motion_path_column: str = "motion_hdf5_path",
 ) -> RunLevelResult:
     """Merge file inventories with readable features and classify file status.
 
@@ -258,20 +323,22 @@ def build_run_level_table(
     run_level_df = conn_files[[*KEY_COLUMNS, "file_path"]].rename(
         columns={"file_path": "conn_mat_path"}
     ).merge(
-        motion_files[[*KEY_COLUMNS, "file_path"]].rename(columns={"file_path": "motion_hdf5_path"}),
+        motion_files[[*KEY_COLUMNS, "file_path"]].rename(columns={"file_path": motion_path_column}),
         on=list(KEY_COLUMNS), how="outer", validate="one_to_one",
     )
+    readable_keys = motion_df[list(KEY_COLUMNS)].drop_duplicates().assign(_motion_readable=True)
     run_level_df = run_level_df.merge(
         connectivity_df.drop(columns="conn_mat_path"),
         on=list(KEY_COLUMNS), how="left", validate="one_to_one",
     ).merge(
         motion_df, on=list(KEY_COLUMNS), how="left", validate="one_to_one",
+    ).merge(
+        readable_keys, on=list(KEY_COLUMNS), how="left", validate="one_to_one",
     )
     run_level_df["connectivity_present"] = run_level_df["conn_mat_path"].notna()
-    run_level_df["motion_present"] = run_level_df["motion_hdf5_path"].notna()
-    run_level_df["motion_readable"] = (
-        run_level_df["fd_threshold"].notna() if "fd_threshold" in run_level_df else False
-    )
+    run_level_df["motion_present"] = run_level_df[motion_path_column].notna()
+    run_level_df["motion_readable"] = run_level_df["_motion_readable"].fillna(False).astype(bool)
+    run_level_df = run_level_df.drop(columns="_motion_readable")
     run_level_df["file_status"] = np.select(
         [
             run_level_df["connectivity_present"] & run_level_df["motion_readable"],
@@ -288,7 +355,7 @@ def build_run_level_table(
     )
     missingness_report = run_level_df.loc[
         run_level_df["file_status"] != "both files readable",
-        [*KEY_COLUMNS, "file_status", "conn_mat_path", "motion_hdf5_path"],
+        [*KEY_COLUMNS, "file_status", "conn_mat_path", motion_path_column],
     ].sort_values(list(KEY_COLUMNS), kind="stable").reset_index(drop=True)
     coverage = _coverage_summary(run_level_df).sort_values(["session", "run"]).reset_index(drop=True)
     return RunLevelResult(
@@ -300,7 +367,8 @@ def build_master_dataframe(
     connectivity_df: pd.DataFrame,
     motion_df: pd.DataFrame,
     feature_columns: Sequence[str],
-    motion_feature_columns: Sequence[str] = MOTION_FEATURE_COLUMNS,
+    motion_feature_columns: Sequence[str] | None = None,
+    metadata_columns: Sequence[str] = (),
 ) -> MasterDatasetResult:
     """Inner-join readable connectivity/motion rows into the master feature table.
 
@@ -310,39 +378,118 @@ def build_master_dataframe(
     matched = connectivity_df.merge(
         motion_df, on=list(KEY_COLUMNS), how="inner", validate="one_to_one",
     )
-    master_df = matched.rename(columns={
+    rename_columns = {
         "subject": "SubjectID", "session": "Session", "run": "Run",
         "seconds_remaining": "remaining_seconds",
-    })[[
-        "SubjectID", "Session", "Run", "remaining_seconds",
-        *motion_feature_columns, *feature_columns,
-    ]]
+    }
+    normalized_motion_columns = tuple(
+        rename_columns.get(column, column)
+        for column in (motion_feature_columns or MOTION_FEATURE_COLUMNS)
+    )
+    if "seconds_remaining" in motion_df and "remaining_seconds" not in normalized_motion_columns:
+        normalized_motion_columns = ("remaining_seconds", *normalized_motion_columns)
+    matched = matched.rename(columns=rename_columns)
+    selected_columns = [
+        "SubjectID", "Session", "Run",
+        *[column for column in ("task",) if column in matched],
+        *normalized_motion_columns,
+        *metadata_columns,
+        *feature_columns,
+    ]
+    selected_columns = list(dict.fromkeys(selected_columns))
+    missing_columns = [column for column in selected_columns if column not in matched]
+    if missing_columns:
+        raise KeyError(f"Master dataframe columns are missing: {missing_columns}")
+    master_df = matched[selected_columns]
     return MasterDatasetResult(
         master_df=master_df,
         feature_columns=tuple(feature_columns),
-        motion_feature_columns=tuple(motion_feature_columns),
+        motion_feature_columns=normalized_motion_columns,
     )
 
 
 def average_matched_runs(master_df: pd.DataFrame, feature_columns: Sequence[str],
-                         motion_feature_columns: Sequence[str] = MOTION_FEATURE_COLUMNS) -> pd.DataFrame:
-    """Average matched, readable runs within subject/session (``df_merged_runs``).
+                         motion_feature_columns: Sequence[str] = MOTION_FEATURE_COLUMNS,
+                         max_runs: int = 2,
+                         selection_column: str = "remaining_seconds",
+                         minimum_selection_value: float = 240,
+                         sum_columns: Sequence[str] = ()) -> pd.DataFrame:
+    """Average runs with the best motion retention within subject/session.
 
-    Adds ``n_runs_included`` and ``runs_included`` (sorted, comma-joined run
-    labels) alongside the averaged numeric columns.
+    Runs are ranked by ``selection_column`` descending; ties are resolved by
+    run label ascending. Sessions with fewer runs retain all available runs,
+    including a single run whose parsed label is ``"n/a"``. A session is
+    retained only when every selected run meets ``minimum_selection_value``.
     """
-    run_mean_columns = ["remaining_seconds", *motion_feature_columns, *feature_columns]
-    grouped = master_df.groupby(["SubjectID", "Session"], as_index=False)
+    if max_runs < 1:
+        raise ValueError("max_runs must be at least 1")
+    required = {"SubjectID", "Session", "Run", selection_column}
+    missing = required - set(master_df.columns)
+    if missing:
+        raise KeyError(f"Missing run-selection columns: {sorted(missing)}")
+
+    selected_runs = (
+        master_df.assign(_run_sort=master_df["Run"].astype(str))
+        .sort_values(
+            ["SubjectID", "Session", selection_column, "_run_sort"],
+            ascending=[True, True, False, True],
+            na_position="last",
+            kind="stable",
+        )
+        .groupby(["SubjectID", "Session"], sort=False, dropna=False)
+        .head(max_runs)
+        .drop(columns="_run_sort")
+    )
+    eligible_sessions = (
+        selected_runs.groupby(["SubjectID", "Session"], dropna=False)[selection_column]
+        .agg(lambda values: values.notna().all() and values.ge(minimum_selection_value).all())
+    )
+    eligible_keys = eligible_sessions[eligible_sessions].index
+    selected_runs = selected_runs.set_index(["SubjectID", "Session"]).loc[
+        eligible_keys
+    ].reset_index()
+    sum_columns = tuple(sum_columns)
+    missing_sum_columns = [column for column in sum_columns if column not in selected_runs]
+    if missing_sum_columns:
+        raise KeyError(f"Missing columns to sum across runs: {missing_sum_columns}")
+    run_mean_columns = list(dict.fromkeys([
+        *([] if selection_column in sum_columns else [selection_column]),
+        *[
+            column for column in motion_feature_columns
+            if column in selected_runs and column not in sum_columns
+        ],
+        *feature_columns,
+    ]))
+    grouped = selected_runs.groupby(["SubjectID", "Session"], as_index=False)
     averaged = grouped[run_mean_columns].mean()
-    run_counts = master_df.groupby(["SubjectID", "Session"]).size().rename("n_runs_included")
-    run_lists = master_df.groupby(["SubjectID", "Session"])["Run"].agg(
+    if sum_columns:
+        summed = grouped[list(sum_columns)].sum()
+        averaged = averaged.merge(
+            summed, on=["SubjectID", "Session"], validate="one_to_one",
+        )
+    metadata_columns = [
+        column for column in selected_runs.select_dtypes(exclude="number").columns
+        if column not in {"SubjectID", "Session", "Run"}
+    ]
+    metadata_summary = selected_runs.groupby(
+        ["SubjectID", "Session"], as_index=False, dropna=False
+    )[metadata_columns].agg(
+        lambda values: ", ".join(pd.unique(values.dropna().astype(str)))
+    ) if metadata_columns else None
+    run_counts = selected_runs.groupby(["SubjectID", "Session"]).size().rename("n_runs_included")
+    run_lists = selected_runs.groupby(["SubjectID", "Session"])["Run"].agg(
         lambda runs: ", ".join(sorted(runs.astype(str).unique()))
     ).rename("runs_included")
-    return averaged.merge(
+    result = averaged.merge(
         run_counts, on=["SubjectID", "Session"], validate="one_to_one",
     ).merge(
         run_lists, on=["SubjectID", "Session"], validate="one_to_one",
     )
+    if metadata_summary is not None:
+        result = result.merge(
+            metadata_summary, on=["SubjectID", "Session"], validate="one_to_one",
+        )
+    return result
 
 
 def run_workflow(
@@ -353,6 +500,7 @@ def run_workflow(
     task_filter: str | None = "rest",
     fd_threshold: float = 0.3,
     motion_thresholds: tuple[float, ...] = DEFAULT_MOTION_THRESHOLDS,
+    minimum_retained_value: float = 240,
     config: AtlasNetworkConfig = AtlasNetworkConfig(),
 ) -> WorkflowResult:
     """Run the full discovery-to-master-dataframe workflow with explicit inputs.
@@ -361,41 +509,64 @@ def run_workflow(
     feature extraction, motion QC readout (retaining unreadable-file
     inventory), run-level coverage/missingness, a multi-threshold remaining
     duration table, the matched-readable master dataframe, run-level
-    feature/motion associations, and multi-run averaging.
+    feature/motion associations, and qualified run averaging. The final
+    subject/session summary requires every selected run to retain at least
+    ``minimum_retained_value`` seconds (DCAN) or volumes (LINC).
     """
     atlas = derive_analysis_atlas(atlas_tsv_path, config)
+    motion_mode = detect_motion_mode(motion_path)
     discovery = discover_run_files(conn_mats_path, motion_path, task_filter)
     connectivity = load_connectivity_features(discovery.conn_files, atlas, config)
-    motion = load_motion_metrics(discovery.motion_files, fd_threshold)
+    motion = load_motion_metrics(discovery.motion_files, fd_threshold, motion_mode=motion_mode)
+    motion_path_column = "motion_hdf5_path" if motion_mode == "dcan_qc" else "motion_csv_path"
     run_level = build_run_level_table(
         discovery.conn_files, discovery.motion_files, connectivity.connectivity_df, motion.motion_df,
+        motion_path_column=motion_path_column,
     )
-    unreadable_paths = set(motion.motion_load_errors["motion_hdf5_path"]) if not motion.motion_load_errors.empty else set()
-    readable_motion_files = discovery.motion_files.loc[
-        discovery.motion_files["file_path"].map(lambda path: str(path) not in unreadable_paths)
-    ]
-    threshold_rows = []
-    for record in readable_motion_files.to_dict("records"):
-        for threshold in motion_thresholds:
-            metrics = read_motion_metrics(record["file_path"], threshold)
-            threshold_rows.append({
-                **{column: record[column] for column in KEY_COLUMNS},
-                "fd_threshold": threshold, "remaining_seconds": metrics["seconds_remaining"],
-            })
-    motion_threshold_df = pd.DataFrame(threshold_rows)
-    threshold_table = _threshold_summary(
-        motion_threshold_df, threshold_column="fd_threshold", value_column="remaining_seconds",
-    )
+    if motion_mode == "dcan_qc":
+        unreadable_paths = set(motion.motion_load_errors["motion_hdf5_path"])
+        readable_motion_files = discovery.motion_files.loc[
+            discovery.motion_files["file_path"].map(lambda path: str(path) not in unreadable_paths)
+        ]
+        threshold_rows = []
+        for record in readable_motion_files.to_dict("records"):
+            for threshold in motion_thresholds:
+                metrics = read_motion_metrics(record["file_path"], threshold)
+                threshold_rows.append({
+                    **{column: record[column] for column in KEY_COLUMNS},
+                    "fd_threshold": threshold, "remaining_seconds": metrics["seconds_remaining"],
+                })
+        motion_threshold_df = pd.DataFrame(threshold_rows)
+        threshold_table = _threshold_summary(
+            motion_threshold_df, threshold_column="fd_threshold", value_column="remaining_seconds",
+        )
+    else:
+        motion_threshold_df = motion.motion_df.copy()
+        retained = motion.motion_df["num_retained_volumes"]
+        threshold_table = pd.DataFrame([{
+            "metric": "num_retained_volumes",
+            **retained.agg(["count", "mean", "median", "min", "max"]).to_dict(),
+        }])
     master = build_master_dataframe(
         connectivity.connectivity_df, motion.motion_df, connectivity.feature_columns,
+        motion.motion_feature_columns, motion.metadata_columns,
     )
     motion_associations = feature_motion_associations(
-        master.master_df, master.feature_columns, motion_column="remaining_seconds",
+        master.master_df, master.feature_columns, motion_column=motion.run_selection_column,
     )
-    merged_runs = average_matched_runs(master.master_df, master.feature_columns, master.motion_feature_columns)
+    merged_runs = average_matched_runs(
+        master.master_df, master.feature_columns, master.motion_feature_columns,
+        selection_column=motion.run_selection_column,
+        minimum_selection_value=minimum_retained_value,
+        sum_columns=(
+            ("num_censored_volumes", "num_retained_volumes")
+            if motion_mode == "linc_qc" else ()
+        ),
+    )
     return WorkflowResult(
         atlas=atlas, discovery=discovery, connectivity=connectivity, motion=motion,
         run_level=run_level, motion_threshold_data=motion_threshold_df,
         threshold_table=threshold_table, master=master,
         motion_associations=motion_associations, merged_runs=merged_runs,
+        motion_mode=motion_mode, run_selection_column=motion.run_selection_column,
     )

@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from rsx_analyzer import (
+    average_matched_runs,
     derive_analysis_atlas,
     run_workflow,
     robust_outlier_screen,
@@ -51,12 +52,14 @@ def _write_conn_matrix(directory, atlas_names, subject, session, task, run, rng)
     matrix = (values + values.T) / 2
     np.fill_diagonal(matrix, 1.0)
     frame = pd.DataFrame(matrix, index=atlas_names, columns=atlas_names)
-    name = f"sub-{subject}_ses-{session}_task-{task}_run-{run}_conmat.tsv"
+    run_entity = f"_run-{run}" if run is not None else ""
+    name = f"sub-{subject}_ses-{session}_task-{task}{run_entity}_conmat.tsv"
     frame.to_csv(Path(directory) / name, sep="\t")
 
 
 def _write_motion_hdf5(directory, subject, session, task, run, remaining_seconds_at_03):
-    name = f"sub-{subject}_ses-{session}_task-{task}_run-{run}_motion.hdf5"
+    run_entity = f"_run-{run}" if run is not None else ""
+    name = f"sub-{subject}_ses-{session}_task-{task}{run_entity}_motion.hdf5"
     with h5py.File(Path(directory) / name, "w") as handle:
         for threshold in (0.3, 0.4, 0.5):
             group = handle.create_group(f"dcan_motion/fd_{threshold:g}")
@@ -68,6 +71,13 @@ def _write_motion_hdf5(directory, subject, session, task, run, remaining_seconds
                 "remaining_seconds", data=remaining_seconds_at_03 - threshold * 10
             )
             group.create_dataset("skip", data=0.0)
+
+
+def _write_linc_motion_csv(path, rows):
+    pd.DataFrame(rows, columns=[
+        "sub", "ses", "task", "run", "space", "res", "desc",
+        "mean_fd", "num_censored_volumes", "num_retained_volumes",
+    ]).to_csv(path, index=False)
 
 
 @unittest.skipUnless(HAVE_H5PY, "requires optional dependency h5py")
@@ -83,7 +93,7 @@ class RunWorkflowTests(unittest.TestCase):
             subjects = [f"{i:02d}" for i in range(1, 6)]
             for offset, subject in enumerate(subjects):
                 _write_conn_matrix(conn_dir, atlas.names, subject, "A", "rest", "1", rng)
-                _write_motion_hdf5(motion_dir, subject, "A", "rest", "1", 177.0 - offset)
+                _write_motion_hdf5(motion_dir, subject, "A", "rest", "1", 277.0 - offset)
             # An unreadable motion file must remain visible, not silently dropped.
             (motion_dir / "sub-99_ses-A_task-rest_run-1_motion.hdf5").write_bytes(b"not hdf5")
 
@@ -115,7 +125,7 @@ class RunWorkflowTests(unittest.TestCase):
             for offset, (subject, runs) in enumerate(layout.items()):
                 for run in runs:
                     _write_conn_matrix(conn_dir, atlas.names, subject, "A", "rest", run, rng)
-                    _write_motion_hdf5(motion_dir, subject, "A", "rest", run, 177.0 - offset - int(run))
+                    _write_motion_hdf5(motion_dir, subject, "A", "rest", run, 277.0 - offset - int(run))
 
             result = run_workflow(conn_dir, motion_dir, ATLAS_PATH)
 
@@ -123,7 +133,7 @@ class RunWorkflowTests(unittest.TestCase):
         self.assertEqual(len(result.merged_runs), 3)
         subject_01 = result.merged_runs.loc[result.merged_runs["SubjectID"] == "01"].iloc[0]
         self.assertEqual(subject_01["n_runs_included"], 2)
-        self.assertEqual(subject_01["runs_included"], "1, 2")
+        self.assertEqual(subject_01["runs_included"], "01, 02")
 
         screen = robust_outlier_screen(
             result.merged_runs, result.master.feature_columns,
@@ -134,6 +144,131 @@ class RunWorkflowTests(unittest.TestCase):
                           "subject_report", "unscorable"},
         )
         self.assertEqual(len(screen["feature_summary"]), len(result.master.feature_columns))
+
+    def test_averages_two_longest_runs_and_keeps_runless_single_run_session(self):
+        atlas = derive_analysis_atlas(ATLAS_PATH)
+        rng = np.random.default_rng(3)
+        with tempfile.TemporaryDirectory() as directory:
+            conn_dir = Path(directory) / "conn_mats"
+            motion_dir = Path(directory) / "dcan_qc"
+            conn_dir.mkdir()
+            motion_dir.mkdir()
+            for run, seconds in (("1", 200.0), ("2", 400.0), ("3", 300.0)):
+                _write_conn_matrix(conn_dir, atlas.names, "01", "A", "rest", run, rng)
+                _write_motion_hdf5(motion_dir, "01", "A", "rest", run, seconds + 3.0)
+            _write_conn_matrix(conn_dir, atlas.names, "02", "A", "rest", None, rng)
+            _write_motion_hdf5(motion_dir, "02", "A", "rest", None, 300.0)
+
+            result = run_workflow(conn_dir, motion_dir, ATLAS_PATH)
+
+        self.assertEqual(len(result.master.master_df), 4)
+        subject_01_master = result.master.master_df.loc[
+            result.master.master_df["SubjectID"] == "01"
+        ]
+        selected = result.merged_runs.loc[
+            result.merged_runs["SubjectID"] == "01"
+        ].iloc[0]
+        self.assertEqual(selected["n_runs_included"], 2)
+        self.assertEqual(selected["runs_included"], "02, 03")
+        self.assertEqual(selected["remaining_seconds"], 350.0)
+        feature = result.master.feature_columns[0]
+        expected_feature_mean = subject_01_master.loc[
+            subject_01_master["Run"].isin(["02", "03"]), feature
+        ].mean()
+        self.assertAlmostEqual(selected[feature], expected_feature_mean)
+
+        single_run = result.merged_runs.loc[
+            result.merged_runs["SubjectID"] == "02"
+        ].iloc[0]
+        self.assertEqual(single_run["n_runs_included"], 1)
+        self.assertEqual(single_run["runs_included"], "n/a")
+        self.assertEqual(single_run["remaining_seconds"], 297.0)
+
+    def test_average_matched_runs_rejects_nonpositive_run_limit(self):
+        frame = pd.DataFrame({
+            "SubjectID": ["01"], "Session": ["A"], "Run": ["1"],
+            "remaining_seconds": [100.0], "feature": [0.5],
+        })
+        with self.assertRaisesRegex(ValueError, "max_runs"):
+            average_matched_runs(frame, ["feature"], motion_feature_columns=(), max_runs=0)
+
+    def test_average_matched_runs_requires_all_selected_runs_to_meet_threshold(self):
+        frame = pd.DataFrame({
+            "SubjectID": ["01", "01", "01", "02", "02", "03"],
+            "Session": ["A"] * 6,
+            "Run": ["01", "02", "03", "01", "02", "n/a"],
+            "remaining_seconds": [240, 260, 500, 300, 239, 240],
+            "feature": [1.0, 3.0, 100.0, 5.0, 9.0, 7.0],
+        })
+        result = average_matched_runs(
+            frame, ["feature"], motion_feature_columns=(),
+            minimum_selection_value=240,
+        )
+        self.assertEqual(result["SubjectID"].tolist(), ["01", "03"])
+        self.assertEqual(result.loc[0, "runs_included"], "02, 03")
+        self.assertEqual(result.loc[0, "feature"], 51.5)
+        self.assertEqual(result.loc[1, "runs_included"], "n/a")
+        self.assertEqual(result.loc[1, "n_runs_included"], 1)
+
+    @unittest.skipUnless(HAVE_H5PY, "requires optional dependency h5py")
+    def test_linc_csv_mode_loads_metadata_and_selects_most_retained_runs(self):
+        atlas = derive_analysis_atlas(ATLAS_PATH)
+        rng = np.random.default_rng(4)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            conn_dir = root / "conn_mats"
+            motion_dir = root / "linc_qc"
+            conn_dir.mkdir()
+            motion_dir.mkdir()
+            for run in ("1", "2", "3"):
+                _write_conn_matrix(conn_dir, atlas.names, "01", "A", "rest", run, rng)
+            _write_conn_matrix(conn_dir, atlas.names, "02", "A", "rest", None, rng)
+            _write_linc_motion_csv(motion_dir / "linc_metrics.csv", [
+                ("sub-01", "ses-A", "task-rest", "run-1", "MNI", "2", "dcan", "0.20", "10", "350"),
+                ("sub-01", "ses-A", "task-rest", "run-2", "MNI", "2", "dcan", "0.10", "5", "400"),
+                ("sub-01", "ses-A", "task-rest", "run-3", "MNI", "2", "dcan", "0.15", "8", "300"),
+                ("sub-02", "ses-A", "task-rest", None, "MNI", "2", "dcan", "0.12", "7", "250"),
+            ])
+
+            result = run_workflow(conn_dir, motion_dir, ATLAS_PATH)
+
+        self.assertEqual(result.motion_mode, "linc_qc")
+        self.assertEqual(result.run_selection_column, "num_retained_volumes")
+        self.assertEqual(len(result.motion.motion_df), 4)
+        self.assertEqual(len(result.master.master_df), 4)
+        self.assertIn("mean_fd", result.master.master_df)
+        self.assertIn("num_censored_volumes", result.master.master_df)
+        self.assertIn("num_retained_volumes", result.master.master_df)
+        self.assertEqual(
+            result.master.master_df.loc[
+                result.master.master_df["SubjectID"] == "01", "Run"
+            ].tolist(),
+            ["01", "02", "03"],
+        )
+        subject_01 = result.merged_runs.loc[
+            result.merged_runs["SubjectID"] == "01"
+        ].iloc[0]
+        self.assertEqual(subject_01["runs_included"], "01, 02")
+        self.assertEqual(subject_01["num_retained_volumes"], 750.0)
+        self.assertEqual(subject_01["num_censored_volumes"], 15.0)
+        self.assertAlmostEqual(subject_01["mean_fd"], 0.15)
+        self.assertEqual(subject_01["space"], "MNI")
+        self.assertEqual(subject_01["res"], "2")
+        self.assertEqual(subject_01["desc"], "dcan")
+        single_run = result.merged_runs.loc[
+            result.merged_runs["SubjectID"] == "02"
+        ].iloc[0]
+        self.assertEqual(single_run["runs_included"], "n/a")
+        self.assertEqual(single_run["num_retained_volumes"], 250.0)
+        self.assertTrue((result.run_level.run_level_df["file_status"] == "both files readable").all())
+
+    def test_motion_mode_is_selected_from_motion_folder_name(self):
+        from rsx_analyzer import detect_motion_mode
+
+        self.assertEqual(detect_motion_mode("/inputs/dcan_qc"), "dcan_qc")
+        self.assertEqual(detect_motion_mode("/inputs/LINC_QC"), "linc_qc")
+        with self.assertRaisesRegex(ValueError, "dcan_qc.*linc_qc"):
+            detect_motion_mode("/inputs/motion")
 
 
 @unittest.skipUnless(HAVE_H5PY and HAVE_MATPLOTLIB, "requires h5py and matplotlib")
@@ -150,7 +285,7 @@ class ExportAnalysisResultsPdfTests(unittest.TestCase):
             motion_dir.mkdir()
             for offset, subject in enumerate(["01", "02", "03"]):
                 _write_conn_matrix(conn_dir, atlas.names, subject, "A", "rest", "1", rng)
-                _write_motion_hdf5(motion_dir, subject, "A", "rest", "1", 177.0 - offset)
+                _write_motion_hdf5(motion_dir, subject, "A", "rest", "1", 277.0 - offset)
 
             result = run_workflow(conn_dir, motion_dir, ATLAS_PATH)
             screen = robust_outlier_screen(
@@ -222,6 +357,7 @@ class ExportExcelFigureTests(unittest.TestCase):
         from openpyxl import load_workbook
         from rsx_analyzer import export_excel
 
+        master = pd.DataFrame({"SubjectID": ["01", "01"], "Run": ["1", "2"]})
         merged_runs = pd.DataFrame({"SubjectID": ["01", "02"], "value": [1.0, 2.0]})
         qc = pd.DataFrame({"SubjectID": ["01"], "n_flagged_values": [3]})
         triple_summary = pd.DataFrame({
@@ -233,7 +369,7 @@ class ExportExcelFigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rs-X1_analysis.xlsx"
             export_excel(
-                {"merged_runs": merged_runs, "QC": qc, "Trinetwork": triple_summary},
+                {"master": master, "merged_runs": merged_runs, "QC": qc, "Trinetwork": triple_summary},
                 path,
                 figure=figure,
                 figure_sheet="Trinetwork",
@@ -243,13 +379,14 @@ class ExportExcelFigureTests(unittest.TestCase):
             plt.close(figure)
 
             workbook = load_workbook(path)
-            self.assertEqual(workbook.sheetnames, ["merged_runs", "QC", "Trinetwork"])
+            self.assertEqual(workbook.sheetnames, ["master", "merged_runs", "QC", "Trinetwork"])
             for sheet_name in workbook.sheetnames:
                 worksheet = workbook[sheet_name]
                 self.assertEqual(worksheet.freeze_panes, "A2")
                 self.assertTrue(worksheet.auto_filter.ref)
                 self.assertTrue(worksheet["A1"].font.bold)
             self.assertEqual(len(workbook["Trinetwork"]._images), 1)
+            self.assertEqual(workbook["master"].max_row, 3)
             self.assertEqual(len(workbook["merged_runs"]._images), 0)
 
     def test_without_figure_still_applies_header_styling(self):
