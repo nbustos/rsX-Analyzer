@@ -144,7 +144,7 @@ python scripts/run_rsx.py --xcpd-dir /path/to/xcp_d --results-dir /path/to/RESUL
 
 Use DCAN motion instead of LINC by pointing `--motion` at a folder named `dcan_qc`.
 Other options: `--atlas`, `--task`, `--fd-threshold` (0.3), `--min-retained` (240),
-`--outlier-z` (3.5); see `python scripts/run_rsx.py --help`.
+`--outlier-z` (3.5), `--verbose` (print full tables; default is one status line per step); see `python scripts/run_rsx.py --help`.
 
 Outputs in `--output-dir`: `rs-X1_analysis.xlsx` (tabs `master`, `merged_runs`, `QC`,
 `Trinetwork`), `rs-X1_results.pdf`, and, when Setup runs, `rs-X1_setup_audit.xlsx`.

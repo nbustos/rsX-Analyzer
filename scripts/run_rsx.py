@@ -36,6 +36,10 @@ TRIPLE_NETWORKS = {
 }
 
 
+def step(msg):
+    print(f"[rs-X1] {msg}", flush=True)
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--xcpd-dir", type=Path, help="XCP-D output dir; enables the Setup step")
@@ -50,6 +54,7 @@ def parse_args(argv=None):
     p.add_argument("--fd-threshold", type=float, default=0.3)
     p.add_argument("--min-retained", type=float, default=240)
     p.add_argument("--outlier-z", type=float, default=3.5)
+    p.add_argument("--verbose", action="store_true", help="Also print the full tables")
     p.add_argument("--output-dir", type=Path, help="Where to write the xlsx/pdf (default: current dir)")
     args = p.parse_args(argv)
     if args.xcpd_dir and not args.results_dir:
@@ -63,17 +68,21 @@ def parse_args(argv=None):
 
 
 def run_setup(args):
+    step(f"Setup: organizing {args.xcpd_dir} -> {args.results_dir} ...")
     result = organize_xcpd_outputs(args.xcpd_dir, args.results_dir, atlases=args.setup_atlases)
-    print("Setup summary:\n", result.summary.to_string(index=False))
-    print("\nSubjects traversed per session:\n", result.n_subjects.to_string())
-    print("\nAudit (subjects per file type by session):\n", result.audit.to_string(index=False))
+    counts = result.manifest["status"].value_counts().to_dict()
+    step(f"Setup done: {len(result.manifest)} files ({counts}); "
+         f"{result.manifest['subject'].nunique()} subjects, sessions: {result.n_subjects.to_dict()}")
+    if args.verbose:
+        print(result.summary.to_string(index=False))
+        print(result.audit.to_string(index=False))
     out = args.output_dir or Path.cwd()
     out.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out / "rs-X1_setup_audit.xlsx") as writer:
         result.manifest.to_excel(writer, sheet_name="manifest", index=False)
         result.audit.to_excel(writer, sheet_name="audit", index=False)
         result.subject_presence.to_excel(writer, sheet_name="subject_presence")
-    print(f"Setup audit workbook: {out / 'rs-X1_setup_audit.xlsx'}")
+    step(f"Setup audit saved: {out / 'rs-X1_setup_audit.xlsx'}")
 
 
 def main(argv=None):
@@ -88,39 +97,52 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     excel_path, pdf_path = out / "rs-X1_analysis.xlsx", out / "rs-X1_results.pdf"
 
+    step("1/5 Loading connectivity and motion data ...")
     analysis = run_workflow(args.conn_mats, args.motion, atlas_tsv, task_filter=args.task,
                             fd_threshold=args.fd_threshold, minimum_retained_value=args.min_retained)
     atlas = analysis.atlas
     feature_columns = list(analysis.connectivity.feature_columns)
     master_df, merged = analysis.master.master_df, analysis.merged_runs
     motion_df = analysis.motion.motion_df
-    print(f"Atlas: {atlas_tsv.name} ({len(atlas.names)} parcels); motion mode: {analysis.motion_mode}")
-    print(f"Loaded {len(analysis.connectivity.connectivity_df)} matrices and {len(motion_df)} readable motion files.")
-    print(f"Features: {len(feature_columns)}; matched runs: {len(master_df)}; merged rows: {len(merged)}")
-    print("\nSubject coverage by session and run:\n", analysis.run_level.coverage_summary.to_string())
-    print("\nMissingness report:\n", analysis.run_level.missingness_report.to_string())
-    if not analysis.motion.motion_load_errors.empty:
-        print("\nUnreadable motion files:\n", analysis.motion.motion_load_errors.to_string())
-    print("\nThreshold summary:\n", analysis.threshold_table.to_string())
-    print("\nTop motion-associated features:\n",
-          analysis.motion_associations[["feature", "n_runs", "spearman_rho", "spearman_q"]].head(20).to_string())
-    by_session, multi = summarize_multiple_runs(merged)
-    print("\nSubjects with multiple runs by session:\n", by_session.to_string())
+    n_missing = len(analysis.run_level.missingness_report)
+    step(f"1/5 Loaded: {len(analysis.connectivity.connectivity_df)} matrices, {len(motion_df)} motion files "
+         f"({analysis.motion_mode}), {len(feature_columns)} features, {n_missing} unmatched/unreadable files")
+    errors = analysis.motion.motion_load_errors
+    if not errors.empty:
+        step(f"WARNING: {len(errors)} unreadable motion files")
 
+    step("2/5 QC: merging runs and testing motion associations ...")
+    by_session, multi = summarize_multiple_runs(merged)
+    top = analysis.motion_associations.iloc[0]["feature"] if len(analysis.motion_associations) else "n/a"
+    step(f"2/5 QC done: {len(master_df)} matched runs -> {len(merged)} merged subject/session rows; "
+         f"{multi['SubjectID'].nunique()} subjects with multiple runs; top motion-associated feature: {top}")
+    if args.verbose:
+        for name, table in (("Coverage", analysis.run_level.coverage_summary),
+                            ("Missingness", analysis.run_level.missingness_report),
+                            ("Thresholds", analysis.threshold_table),
+                            ("Multiple runs", by_session)):
+            print(f"\n{name}:\n{table.to_string()}")
+
+    step("3/5 Screening feature outliers ...")
     outliers = robust_outlier_screen(merged, feature_columns, z_threshold=args.outlier_z)
     report = outliers["subject_report"]
-    print(f"\nFlagged {len(report)} subjects; unscorable features: {len(outliers['unscorable'])}")
-    print(report.to_string())
+    step(f"3/5 Outliers done: {len(report)} flagged subjects, {len(outliers['unscorable'])} unscorable features")
+    if args.verbose:
+        print(report.to_string())
 
+    step("4/5 Computing triple-network summaries ...")
     counts = pd.Series(atlas.networks["network_label_19network"]).value_counts().to_dict()
     triple_df, triple_summary = triple_network_summary(merged, counts, TRIPLE_NETWORKS)
     order = [f"{n} within" for n in TRIPLE_NETWORKS] + [
         f"{a} x {b}" for i, a in enumerate(TRIPLE_NETWORKS) for b in list(TRIPLE_NETWORKS)[i + 1:]]
-    print("\nTriple-network summary:\n", triple_summary.to_string())
     fig = plot_triple_networks(triple_df, order=order).figure
     fig.axes[0].set_title("Triple-network connectivity by atlas resolution")
     fig.tight_layout()
+    step(f"4/5 Triple-network done: {len(triple_summary)} summary rows")
+    if args.verbose:
+        print(triple_summary.to_string())
 
+    step("5/5 Writing Excel and PDF ...")
     export_excel({"master": master_df, "merged_runs": merged, "QC": report, "Trinetwork": triple_summary},
                  excel_path, figure=fig, figure_sheet="Trinetwork",
                  figure_title="Triple-network connectivity by atlas resolution",
@@ -135,7 +157,7 @@ def main(argv=None):
         outlier_feature_summary=outliers["feature_summary"], outlier_subject_report=report,
         triple_summary=triple_summary, triple_network_df=triple_df, triple_feature_order=order,
         outlier_z_threshold=args.outlier_z, motion_mode=analysis.motion_mode)
-    print(f"\nExcel workbook: {excel_path}\nPrint-ready PDF: {pdf_path}")
+    step(f"5/5 Done. Excel: {excel_path} | PDF: {pdf_path}")
     return 0
 
 
