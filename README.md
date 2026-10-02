@@ -123,3 +123,16 @@ RESULTS/motion/{dcan_qc,linc_qc}
 The result also includes an audit: `audit` (unique subjects per format/atlas/kind/extension by
 session plus `all_sessions`), `n_subjects` (subjects with a `func` dir per session) and
 `subject_presence` (subject x file-type matrix of sessions holding that file type).
+
+## Command-line script
+
+`scripts/run_rsx.py` runs the same workflow as `rs-X1.ipynb` without Jupyter
+(tables are printed; the Excel workbook and PDF report are written to `--output-dir`):
+
+```bash
+python scripts/run_rsx.py --conn-mats RESULTS/atlases/NIFTI/4S356/conn_mats \
+    --motion RESULTS/motion/linc_qc --output-dir out
+# Optional Setup first (also writes rs-X1_setup_audit.xlsx):
+python scripts/run_rsx.py --xcpd-dir /path/to/xcp_d --results-dir RESULTS --output-dir out
+python scripts/run_rsx.py --help
+```
