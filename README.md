@@ -87,18 +87,94 @@ from `df_merged_runs`. In LINC merged summaries, `num_censored_volumes` and
 `num_retained_volumes` are summed over the selected runs; `mean_fd`, other
 motion metrics, and connectivity features are averaged.
 
-## Installation with conda (recommended)
+## Installation and usage with conda (recommended)
 
-From the repository root:
+Requires [git](https://git-scm.com) and [conda](https://docs.conda.io) (Anaconda or Miniconda).
+Run each command on its own, from the repository root, without pasting `#` comments.
+
+### 1. Get the code
 
 ```bash
-conda env create -f environment.yml     # builds env "rsx" with all dependencies from conda-forge
-conda activate rsx
-python -m pip install -e . --no-deps   # registers the rsx_analyzer package, no dependency changes
-python scripts/run_rsx.py --help
+git clone https://github.com/nbustos/rsX-Analyzer.git
+cd rsX-Analyzer
 ```
 
-To update later: `git pull`, then `conda env update -f environment.yml --prune`.
+### 2. Create the environment (one time)
+
+`environment.yml` installs Python 3.12 and all dependencies (numpy, pandas, h5py,
+openpyxl, matplotlib, scipy, seaborn, statsmodels, Jupyter) from conda-forge:
+
+```bash
+conda env create -f environment.yml
+conda activate rsx
+python -m pip install -e . --no-deps
+python -c "import rsx_analyzer, matplotlib; print('ok')"
+```
+
+The last step registers the `rsx_analyzer` package without changing any conda packages.
+Warnings about `~/.conda/environments.txt` not being writable are harmless.
+
+### 3. Run the analysis
+
+Always `conda activate rsx` first, and run from the repository root.
+
+Full pipeline from raw XCP-D output (Setup, then analysis):
+
+```bash
+python scripts/run_rsx.py \
+    --xcpd-dir /path/to/derivatives/xcp_d \
+    --results-dir /path/to/RESULTS \
+    --output-dir /path/to/RESULTS/out
+```
+
+Analysis only, on an already organized RESULTS directory:
+
+```bash
+python scripts/run_rsx.py \
+    --conn-mats /path/to/RESULTS/atlases/NIFTI/4S356/conn_mats \
+    --motion /path/to/RESULTS/motion/linc_qc \
+    --output-dir /path/to/out
+```
+
+Setup only (organize files and write the audit workbook):
+
+```bash
+python scripts/run_rsx.py --xcpd-dir /path/to/xcp_d --results-dir /path/to/RESULTS --setup-only
+```
+
+Use DCAN motion instead of LINC by pointing `--motion` at a folder named `dcan_qc`.
+Other options: `--atlas`, `--task`, `--fd-threshold` (0.3), `--min-retained` (240),
+`--outlier-z` (3.5); see `python scripts/run_rsx.py --help`.
+
+Outputs in `--output-dir`: `rs-X1_analysis.xlsx` (tabs `master`, `merged_runs`, `QC`,
+`Trinetwork`), `rs-X1_results.pdf`, and, when Setup runs, `rs-X1_setup_audit.xlsx`.
+
+### 4. Or use the notebook
+
+```bash
+jupyter lab rs-X1.ipynb
+```
+
+Select the `rsx` kernel, edit the paths in the Setup and Section 1 config cells, and run all cells.
+
+### Updating
+
+```bash
+cd rsX-Analyzer
+git pull
+conda activate rsx
+conda env update -f environment.yml --prune
+```
+
+Restart any open notebook kernel after updating.
+
+### Troubleshooting
+
+- `No module named rsx_analyzer` or `matplotlib`: you are not in the `rsx` environment, or
+  the install step was skipped. Run `conda activate rsx` and `python -m pip install -e . --no-deps`.
+- `can't open file .../scripts/scripts/run_rsx.py`: you are inside `scripts/`. `cd` to the repo root.
+- `Python 3.9` in tracebacks: the base environment is active; run `conda activate rsx`.
+- `prefix already exists` on create: run `conda env remove -n rsx -y` first, then create again.
 
 ## Development
 
@@ -136,16 +212,3 @@ RESULTS/motion/{dcan_qc,linc_qc}
 The result also includes an audit: `audit` (unique subjects per format/atlas/kind/extension by
 session plus `all_sessions`), `n_subjects` (subjects with a `func` dir per session) and
 `subject_presence` (subject x file-type matrix of sessions holding that file type).
-
-## Command-line script
-
-`scripts/run_rsx.py` runs the same workflow as `rs-X1.ipynb` without Jupyter
-(tables are printed; the Excel workbook and PDF report are written to `--output-dir`):
-
-```bash
-python scripts/run_rsx.py --conn-mats RESULTS/atlases/NIFTI/4S356/conn_mats \
-    --motion RESULTS/motion/linc_qc --output-dir out
-# Optional Setup first (also writes rs-X1_setup_audit.xlsx):
-python scripts/run_rsx.py --xcpd-dir /path/to/xcp_d --results-dir RESULTS --output-dir out
-python scripts/run_rsx.py --help
-```
