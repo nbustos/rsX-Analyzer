@@ -94,6 +94,7 @@ From the repository root:
 ```bash
 conda env create -f environment.yml     # builds env "rsx" with all dependencies from conda-forge
 conda activate rsx
+python -m pip install -e . --no-deps   # registers the rsx_analyzer package, no dependency changes
 python scripts/run_rsx.py --help
 ```
 
