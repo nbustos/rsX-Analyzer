@@ -206,6 +206,7 @@ RESULTS/motion/{dcan_qc,linc_qc}
 - Default atlases: `4S356, Gordon, HCP, Tian` (`4S356` also matches `atlas-4S356Parcels`).
 - `space-fsLR` files go to `CIFTI`; other spaces go to `NIFTI`.
 - Connectivity files (`conmat`/`relmat`/`pconn`) and `coverage` files go to `conn_mats`.
+- Only `.tsv` and `.csv` files are copied (JSON sidecars, NIfTI/CIFTI images and HDF5 files are skipped). DCAN motion files are `.hdf5`, so pass `extensions=(".tsv", ".csv", ".hdf5")` to `organize_xcpd_outputs` if you need them.
 - Files are copied, never moved; identical files are skipped, differing ones are reported as `conflict`.
 - The return value has a per-file `manifest` and a `summary` count table.
 

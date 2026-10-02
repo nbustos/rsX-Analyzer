@@ -24,7 +24,7 @@ MOTION_KINDS = ("dcan_qc", "linc_qc")
 MANIFEST_COLUMNS = ["subject", "session", "format", "atlas", "kind", "ext", "source",
                     "destination", "status"]
 
-_DATA_SUFFIXES = (".tsv", ".json", ".nii", ".nii.gz")
+DEFAULT_EXTENSIONS = (".tsv", ".csv")
 
 
 @dataclass
@@ -83,19 +83,21 @@ def _match_atlas(label: str | None, atlases) -> str | None:
     return None
 
 
-def classify_func_file(path: Path, atlases=DEFAULT_ATLASES):
+def classify_func_file(path: Path, atlases=DEFAULT_ATLASES, extensions=DEFAULT_EXTENSIONS):
     """Return ``(format, atlas, kind)`` for a func file or ``None`` to skip it.
 
     ``atlas`` is ``None`` for motion files.
     """
     name = path.name
+    if not name.endswith(tuple(extensions)):
+        return None
     if name.endswith("desc-dcan_qc.hdf5"):
         kind, atlas = "dcan_qc", None
     elif name.endswith("desc-linc_qc.csv") or name.endswith("desc-linc_qc.tsv"):
         kind, atlas = "linc_qc", None
     else:
         atlas = _match_atlas(_entity(name, "atlas"), atlases)
-        if atlas is None or not name.endswith(_DATA_SUFFIXES):
+        if atlas is None:
             return None
         if "reho" in name:
             kind = "reho"
@@ -116,8 +118,13 @@ def _same_file(a: Path, b: Path) -> bool:
 
 
 def organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES,
-                          dry_run: bool = False) -> OrganizeResult:
+                          dry_run: bool = False,
+                          extensions=DEFAULT_EXTENSIONS) -> OrganizeResult:
     """Copy designated-atlas, ReHo, timeseries, conn_mat and motion files.
+
+    Only files whose names end in ``extensions`` (default ``.tsv`` and ``.csv``)
+    are copied; JSON sidecars, NIfTI/CIFTI images and HDF5 files are skipped.
+    Add ``".hdf5"`` to ``extensions`` to also copy DCAN motion files.
 
     Traverses ``sub-*/[ses-*/]func``. Existing identical files are skipped, so the
     function is safe to re-run; existing files with different content are not
@@ -147,7 +154,7 @@ def organize_xcpd_outputs(xcpd_dir, results_dir, atlases=DEFAULT_ATLASES,
                 continue
             subjects_by_session.setdefault(session, set()).add(sub_dir.name)
             for src in sorted(p for p in func_dir.iterdir() if p.is_file()):
-                cls = classify_func_file(src, atlases)
+                cls = classify_func_file(src, atlases, extensions)
                 if cls is None:
                     continue
                 fmt, atlas, kind = cls
