@@ -89,7 +89,11 @@ motion metrics, and connectivity features are averaged.
 
 ## Development
 
-Install the package and test dependencies, then run the test suite:
+Requires Python 3.10 or newer (check with `python --version`; the base
+Anaconda Python 3.9 is too old, so create an environment first, e.g.
+`conda create -n rsx python=3.12 && conda activate rsx`). Run the commands
+below from the repository root. The notebook also needs
+`python -m pip install -e '.[notebook]'`. Install the package and test dependencies, then run the test suite:
 
 ```bash
 python -m pip install -e '.[test]'
